@@ -1950,7 +1950,7 @@ def get_callers(
         insn = idaapi.insn_t()
         idaapi.decode_insn(insn, caller_address)
         # check the instruction is a call
-        if insn.itype not in [idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni]:
+        if insn.itype not in [idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni, idaapi.NN_jmp, idaapi.NN_jmpni, idaapi.NN_jmpfi]:
             continue
         # deduplicate callers by address
         callers[func["address"]] = func
