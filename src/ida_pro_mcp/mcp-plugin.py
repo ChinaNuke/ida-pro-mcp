@@ -1258,7 +1258,7 @@ def get_function(address, *, raise_error=True):
     except AttributeError:
         name = ida_funcs.get_func_name(fn.start_ea)
 
-    return Function(address=hex(address), name=name, size=hex(fn.end_ea - fn.start_ea))
+    return Function(address=hex(fn.start_ea), name=name, size=hex(fn.end_ea - fn.start_ea))
 
 DEMANGLED_TO_EA = {}
 
@@ -1941,14 +1941,14 @@ def get_callers(
 ) -> list[Function]:
     """Get all callers of the given address"""
     callers = {}
-    for caller_address in idautils.CodeRefsTo(parse_address(function_address), 0):
+    for callsite_address in idautils.CodeRefsTo(parse_address(function_address), 0):
         # validate the xref address is a function
-        func = get_function(caller_address, raise_error=False)
+        func = get_function(callsite_address, raise_error=False)
         if not func:
             continue
         # load the instruction at the xref address
         insn = idaapi.insn_t()
-        idaapi.decode_insn(insn, caller_address)
+        idaapi.decode_insn(insn, callsite_address)
         # check the instruction is a call
         if insn.itype not in [idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni, idaapi.NN_jmp, idaapi.NN_jmpni, idaapi.NN_jmpfi]:
             continue
