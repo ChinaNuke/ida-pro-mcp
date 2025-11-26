@@ -1934,14 +1934,24 @@ def get_callees(
     unique_callees = [dict(callee) for callee in unique_callee_tuples]
     return unique_callees  # type: ignore
 
-@jsonrpc
-@idaread
-def get_callers(
-    function_address: Annotated[str, "Address of the function to get callers"],
-) -> list[Function]:
-    """Get all callers of the given address"""
+def is_thunk_function(func: Function) -> bool:
+    """Check if a function is a thunk (name starts with '.')"""
+    return func["name"].startswith(".")
+
+def get_callers_internal(function_address: str, visited: set[str]) -> dict[str, Function]:
+    """Internal function to get immediate callers of a function.
+
+    Args:
+        function_address: Address of the function (as hex string)
+        visited: Set of already-visited addresses (for recursion control)
+
+    Returns:
+        Dictionary mapping caller addresses to Function objects
+    """
     callers = {}
-    for callsite_address in idautils.CodeRefsTo(parse_address(function_address), 0):
+    addr = parse_address(function_address)
+
+    for callsite_address in idautils.CodeRefsTo(addr, 0):
         # validate the xref address is a function
         func = get_function(callsite_address, raise_error=False)
         if not func:
@@ -1949,13 +1959,71 @@ def get_callers(
         # load the instruction at the xref address
         insn = idaapi.insn_t()
         idaapi.decode_insn(insn, callsite_address)
-        # check the instruction is a call
+        # check the instruction is a call or jump
         if insn.itype not in [idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni, idaapi.NN_jmp, idaapi.NN_jmpni, idaapi.NN_jmpfi]:
             continue
         # deduplicate callers by address
         callers[func["address"]] = func
 
-    return list(callers.values())
+    return callers
+
+@jsonrpc
+@idaread
+def get_callers(
+    function_address: Annotated[str, "Address of the function to get callers"],
+) -> list[Function]:
+    """Get all callers of the given address (automatically unwraps thunk functions)"""
+
+    def unwrap_thunks(callers: dict[str, Function], visited: set[str]) -> dict[str, Function]:
+        """Recursively unwrap thunk functions in the callers dictionary.
+
+        Args:
+            callers: Dictionary of caller address -> Function
+            visited: Set of addresses already visited (prevents circular references)
+
+        Returns:
+            Dictionary with thunks replaced by their callers
+        """
+        result = {}
+
+        for addr, caller in callers.items():
+            if not is_thunk_function(caller):
+                # Regular function - keep it
+                result[addr] = caller
+            else:
+                # Thunk function - try to unwrap
+                if addr in visited:
+                    # Circular reference detected - keep thunk as fallback
+                    print(f"nuke: circular reference detected for thunk {caller['name']} at {addr}, keeping as fallback")
+                    result[addr] = caller
+                else:
+                    # Mark this thunk as visited
+                    new_visited = visited | {addr}
+
+                    # Get callers of this thunk
+                    thunk_callers = get_callers_internal(addr, new_visited)
+
+                    if not thunk_callers:
+                        # No callers found - keep thunk as fallback
+                        print(f"nuke: no callers found for thunk {caller['name']} at {addr}, keeping as fallback")
+                        result[addr] = caller
+                    else:
+                        # Recursively unwrap any thunks in the thunk's callers
+                        print(f"nuke: unwrapping thunk {caller['name']} at {addr}, found {len(thunk_callers)} caller(s)")
+                        unwrapped = unwrap_thunks(thunk_callers, new_visited)
+                        result.update(unwrapped)
+
+        return result
+
+    # Get initial callers
+    initial_callers = get_callers_internal(function_address, set())
+    print(f"nuke: initial callers for {function_address}: {len(initial_callers)} found")
+
+    # Unwrap thunks recursively
+    final_callers = unwrap_thunks(initial_callers, set())
+    print(f"nuke: final callers after unwrapping: {final_callers}")
+
+    return list(final_callers.values())
 
 @jsonrpc
 @idaread
