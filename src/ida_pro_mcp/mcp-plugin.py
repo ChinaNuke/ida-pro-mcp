@@ -2039,6 +2039,18 @@ def get_entry_points() -> list[Function]:
     return result
 
 @jsonrpc
+@idaread
+def is_entry_point(address: Annotated[str, "Address to check if it is an entry point"]) -> bool:
+    """Check if an address is an entry point"""
+    addr = parse_address(address)
+    for i in range(ida_entry.get_entry_qty()):
+        ordinal = ida_entry.get_entry_ordinal(i)
+        entry_address = ida_entry.get_entry(ordinal)
+        if entry_address == addr:
+            return True
+    return False
+
+@jsonrpc
 @idawrite
 def set_comment(
     address: Annotated[str, "Address in the function to set the comment for"],
