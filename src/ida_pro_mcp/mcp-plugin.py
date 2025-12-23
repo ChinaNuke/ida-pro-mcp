@@ -1542,6 +1542,13 @@ class Import(TypedDict):
     imported_name: str
     module: str
 
+class Export(TypedDict):
+    address: str
+    exported_name: str
+    module: str
+
+# list_imports_filter and list_exports_filter could be added later if needed
+
 @jsonrpc
 @idaread
 def list_imports(
@@ -1569,6 +1576,34 @@ def list_imports(
         ida_nalt.enum_import_names(i, imp_cb_w_context)
 
     return paginate(rv, offset, count)
+
+# @jsonrpc
+# @idaread
+# def list_exports(
+#         offset: Annotated[int, "Offset to start listing from (start at 0)"],
+#         count: Annotated[int, "Number of exports to list (100 is a good default, 0 means remainder)"],
+# ) -> Page[Export]::
+#     """ List all exported symbols with their name and module (paginated) """
+#     nimps = ida_nalt.get_export_module_qty()
+
+#     rv = []
+#     for i in range(nimps):
+#         module_name = ida_nalt.get_export_module_name(i)
+#         if not module_name:
+#             module_name = "<unnamed>"
+
+#         def exp_cb(ea, symbol_name, ordinal, acc):
+#             if not symbol_name:
+#                 symbol_name = f"#{ordinal}"
+
+#             acc += [Import(address=hex(ea), imported_name=symbol_name, module=module_name)]
+
+#             return True
+
+#         exp_cb_w_context = lambda ea, symbol_name, ordinal: exp_cb(ea, symbol_name, ordinal, rv)
+#         ida_nalt.enum_export_names(i, exp_cb_w_context)
+
+#     return paginate(rv, offset, count)
 
 class String(TypedDict):
     address: str
@@ -2202,6 +2237,7 @@ def get_global_variable_value_by_name(variable_name: Annotated[str, "Name of the
     if ea == idaapi.BADADDR:
         raise IDAError(f"Global variable {variable_name} not found")
 
+    # FIXME: return zero when the variable is in .bss section.
     return get_global_variable_value_internal(ea)
 
 @jsonrpc
@@ -2219,16 +2255,35 @@ def get_global_variable_value_internal(ea: int) -> str:
      # Get the type information for the variable
      tif = ida_typeinf.tinfo_t()
      if not ida_nalt.get_tinfo(tif, ea):
-         # No type info, maybe we can figure out its size by its name
-         if not ida_bytes.has_any_name(ea):
-             raise IDAError(f"Failed to get type information for variable at {ea:#x}")
+         # No type info, try to infer size from database flags
+         flags = ida_bytes.get_flags(ea)
+         size = 0
 
-         size = ida_bytes.get_item_size(ea)
+         if ida_bytes.is_data(flags):
+             dt = flags & ida_bytes.DT_TYPE
+             if dt == ida_bytes.FF_BYTE:
+                 size = 1
+             elif dt == ida_bytes.FF_WORD:
+                 size = 2
+             elif dt == ida_bytes.FF_DWORD:
+                 size = 4
+             elif dt == ida_bytes.FF_QWORD:
+                 size = 8
+
+         # Fallback to item size if flags didn't give us a size
+         if size == 0:
+             size = ida_bytes.get_item_size(ea)
+
          if size == 0:
              raise IDAError(f"Failed to get type information for variable at {ea:#x}")
      else:
          # Determine the size of the variable
          size = tif.get_size()
+
+     # Check if bytes are initialized (.bss segment has uninitialized data)
+     if not ida_bytes.is_loaded(ea):
+         # .bss segment - uninitialized, zero at runtime
+         return hex(0)
 
      # Read the value based on the size
      if size == 0 and tif.is_array() and tif.get_array_element().is_decl_char():
