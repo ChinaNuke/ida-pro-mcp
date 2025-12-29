@@ -1547,15 +1547,13 @@ class Export(TypedDict):
     exported_name: str
     module: str
 
-# list_imports_filter and list_exports_filter could be added later if needed
-
 @jsonrpc
-@idaread
-def list_imports(
+def list_imports_filter(
         offset: Annotated[int, "Offset to start listing from (start at 0)"],
         count: Annotated[int, "Number of imports to list (100 is a good default, 0 means remainder)"],
+        filter: Annotated[str, "Filter to apply to the list (required parameter, empty string for no filter). Case-insensitive contains or /regex/ syntax"],
 ) -> Page[Import]:
-    """ List all imported symbols with their name and module (paginated) """
+    """ List matching imports in the database (paginated, filtered) """
     nimps = ida_nalt.get_import_module_qty()
 
     rv = []
@@ -1575,7 +1573,16 @@ def list_imports(
         imp_cb_w_context = lambda ea, symbol_name, ordinal: imp_cb(ea, symbol_name, ordinal, rv)
         ida_nalt.enum_import_names(i, imp_cb_w_context)
 
+    rv = pattern_filter(rv, filter, "imported_name")
     return paginate(rv, offset, count)
+
+@jsonrpc
+def list_imports(
+        offset: Annotated[int, "Offset to start listing from (start at 0)"],
+        count: Annotated[int, "Number of imports to list (100 is a good default, 0 means remainder)"],
+) -> Page[Import]:
+    """ List all imported symbols with their name and module (paginated) """
+    return list_imports_filter(offset, count, "")
 
 # @jsonrpc
 # @idaread
