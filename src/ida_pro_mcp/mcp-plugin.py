@@ -603,13 +603,8 @@ class MCPServer:
             self._send_http_response(client_socket, 200, headers)
 
             # Send endpoint event with session ID for routing
-            # MCP clients can POST to /sse with the Mcp-Session-Id header or use this legacy URL
-            conn.send_event("endpoint", {
-                "url": f"/sse?session={conn.session_id}",
-                "headers": {
-                    "Mcp-Session-Id": conn.session_id
-                }
-            })
+            # Standard MCP SSE transport uses /messages/ endpoint
+            conn.send_event("endpoint", f"/messages/?session_id={conn.session_id}")
 
             # Keep connection alive with periodic pings
             last_ping = time.time()
@@ -627,12 +622,15 @@ class MCPServer:
                 self.connections.remove(conn)
 
     def _handle_message_post(self, client_socket: socket.socket, body: bytes, client_address, path: str, headers: dict):
-        """Handle POST /sse (MCP JSON-RPC request) - SSE mode"""
+        """Handle POST /sse or /messages/ (MCP JSON-RPC request) - SSE mode"""
         try:
             # Extract session ID from query parameters
             parsed = urlparse(path)
             query_params = parse_qs(parsed.query)
+            # Check both 'session' (legacy) and 'session_id' (standard) parameters
             session_id = query_params.get('session', [None])[0]
+            if session_id is None:
+                session_id = query_params.get('session_id', [None])[0]
             if session_id is None:
                 session_id = headers.get("mcp-session-id")
 
@@ -764,7 +762,7 @@ class MCPServer:
         headers = {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Headers": "Content-Type, Mcp-Session-Id",
             "Access-Control-Max-Age": "86400"
         }
         self._send_http_response(client_socket, 200, headers)
@@ -899,8 +897,8 @@ class MCPServer:
             # Parse HTTP request
             method, path, headers, body = self._parse_http_request(data)
 
-            # Debug logging
-            # print(f"[MCP SSE DEBUG] {method} {path} from {client_address}")
+            # Debug logging (uncomment for troubleshooting)
+            # print(f"[MCP DEBUG] {method} {path} from {client_address}")
 
             # Route request
             # Extract base path (before query params)
@@ -913,7 +911,11 @@ class MCPServer:
                 # SSE connection - keep alive
                 self._handle_sse_connection(client_socket, client_address, headers)
             elif method == "POST" and base_path == "/sse":
-                # Handle MCP requests via SSE
+                # Handle MCP requests via SSE (legacy endpoint)
+                self._handle_message_post(client_socket, body, client_address, path, headers)
+                client_socket.close()
+            elif method == "POST" and base_path in ("/messages", "/messages/"):
+                # Handle MCP requests via SSE (standard endpoint)
                 self._handle_message_post(client_socket, body, client_address, path, headers)
                 client_socket.close()
             elif method == "POST" and base_path == "/mcp":
