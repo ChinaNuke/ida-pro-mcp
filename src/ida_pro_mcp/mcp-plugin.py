@@ -296,38 +296,107 @@ class MCPServer:
         self.connections: list[SSEConnection] = []
         self.mcp_handler = MCPProtocolHandler(rpc_registry)
 
+        # Debug logging (controlled by MCP_DEBUG environment variable)
+        self._debug = os.environ.get('MCP_DEBUG', '0') == '1'
+        self._log_file = None
+        if self._debug:
+            self._setup_logging()
+
+    def _setup_logging(self):
+        """Setup debug logging to file"""
+        try:
+            import datetime
+            log_dir = os.path.join(os.path.expanduser("~"), ".ida_mcp_logs")
+            os.makedirs(log_dir, exist_ok=True)
+
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = os.path.join(log_dir, f"mcp_debug_{timestamp}.log")
+            self._log_file = open(log_path, 'w')
+            self._log(f"MCP Debug logging started: {log_path}")
+            print(f"[MCP] Debug log: {log_path}")
+        except Exception as e:
+            print(f"[MCP] Failed to setup logging: {e}")
+            self._log_file = None
+
+    def _log(self, msg: str):
+        """Thread-safe debug logging (only active when MCP_DEBUG=1)"""
+        if not self._debug:
+            return
+        try:
+            import datetime
+            thread_name = threading.current_thread().name
+            thread_id = threading.current_thread().ident
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            log_msg = f"[{timestamp}] [{thread_name}:{thread_id}] {msg}"
+
+            # Print to console
+            print(f"[MCP DEBUG] {log_msg}")
+
+            # Write to file
+            if self._log_file:
+                self._log_file.write(log_msg + "\n")
+                self._log_file.flush()
+        except:
+            pass  # Don't let logging crash the plugin
+
     def start(self):
         """Start the MCP server"""
         if self.running:
+            self._log("start() called but server already running")
             print("[MCP] Server is already running")
             return
 
+        self._log("Starting MCP server")
         self.server_thread = threading.Thread(target=self._run_server, daemon=True)
         self.running = True
         self.server_thread.start()
+        self._log(f"Server thread started: {self.server_thread.name}")
 
     def stop(self):
         """Stop the MCP server"""
+        self._log("stop() called")
         if not self.running:
+            self._log("stop() - server not running, returning")
             return
 
+        self._log("Setting running = False")
         self.running = False
 
         # Close all SSE connections
-        for conn in self.connections[:]:
+        self._log(f"Closing {len(self.connections)} SSE connections")
+        for i, conn in enumerate(self.connections[:]):
+            self._log(f"Closing connection {i+1}/{len(self.connections)}: {conn.session_id}")
             conn.close()
         self.connections.clear()
+        self._log("All connections cleared")
 
         # Close server socket
         if self.server_socket:
+            self._log("Closing server socket")
             try:
                 self.server_socket.close()
-            except:
-                pass
+                self._log("Server socket closed")
+            except Exception as e:
+                self._log(f"Error closing server socket: {e}")
             self.server_socket = None
 
         if self.server_thread:
+            self._log(f"Joining server thread with 2s timeout")
             self.server_thread.join(timeout=2)
+            if self.server_thread.is_alive():
+                self._log("WARNING: Server thread still alive after 2s timeout!")
+            else:
+                self._log("Server thread joined successfully")
+
+        # Close log file
+        self._log("Server stopped")
+        if self._log_file:
+            self._log("Closing log file")
+            try:
+                self._log_file.close()
+            except:
+                pass
+            self._log_file = None
 
         print("[MCP] Server stopped")
 
@@ -513,11 +582,19 @@ class MCPServer:
             try:
                 # Handle MCP protocol methods
                 if method == "initialize":
+                    self._log(f"Calling: initialize")
                     result = self.mcp_handler.handle_initialize(params)
+                    self._log(f"Completed: initialize")
                 elif method == "tools/list":
+                    self._log(f"Calling: tools/list")
                     result = self.mcp_handler.handle_tools_list(params)
+                    self._log(f"Completed: tools/list")
                 elif method == "tools/call":
+                    tool_name = params.get('name', 'unknown') if params else 'unknown'
+                    tool_args = params.get('arguments', {}) if params else {}
+                    self._log(f"Calling tool: {tool_name} with args: {str(tool_args)[:200]}")
                     result = self.mcp_handler.handle_tools_call(params)
+                    self._log(f"Completed tool: {tool_name}")
                 else:
                     raise JSONRPCError(-32601, f"Method not found: {method}")
 
@@ -573,24 +650,32 @@ class MCPServer:
 
     def _handle_sse_connection(self, client_socket: socket.socket, client_address, headers: dict):
         """Handle SSE connection (GET /sse)"""
+        self._log(f"_handle_sse_connection() started for {client_address}")
         requested_session_id = headers.get("mcp-session-id")
         if requested_session_id:
             session_id = requested_session_id
+            self._log(f"Looking up session {session_id}, total sessions: {len(self.sessions)}")
             # Ensure the session exists (created during streamable HTTP handshake)
             session_state = self.sessions.get(session_id)
             if session_state is None:
+                self._log(f"Session {session_id} not found!")
                 self._send_http_response(client_socket, 404, {
                     "Content-Type": "text/plain"
                 }, b"Unknown MCP session (initialize first)")
                 client_socket.close()
                 return
             session_state.update_activity()
+            self._log(f"Session {session_id} found and updated")
         else:
             session_id = str(uuid.uuid4())
+            self._log(f"Creating new session {session_id}")
             self.sessions[session_id] = SessionState(session_id)
+            self._log(f"Session created, now have {len(self.sessions)} sessions")
 
         conn = SSEConnection(client_socket, client_address, session_id)
+        self._log(f"Adding SSE connection {conn.session_id}, total connections: {len(self.connections)}")
         self.connections.append(conn)
+        self._log(f"Connection added, now have {len(self.connections)} connections")
 
         try:
             # Send SSE headers
@@ -616,13 +701,23 @@ class MCPServer:
                     last_ping = now
                 time.sleep(1)
 
+        except Exception as e:
+            self._log(f"EXCEPTION in _handle_sse_connection: {type(e).__name__}: {e}")
+            self._log(f"Traceback:\n{traceback.format_exc()}")
+            raise
         finally:
             conn.close()
+            self._log(f"Removing SSE connection {conn.session_id}, total connections: {len(self.connections)}")
             if conn in self.connections:
                 self.connections.remove(conn)
+                self._log(f"Connection removed, now have {len(self.connections)} connections")
+            else:
+                self._log(f"WARNING: Connection {conn.session_id} not in list!")
+            self._log(f"_handle_sse_connection() finished for {client_address}")
 
     def _handle_message_post(self, client_socket: socket.socket, body: bytes, client_address, path: str, headers: dict):
         """Handle POST /sse or /messages/ (MCP JSON-RPC request) - SSE mode"""
+        self._log(f"_handle_message_post() started for {client_address}")
         try:
             # Extract session ID from query parameters
             parsed = urlparse(path)
@@ -664,10 +759,13 @@ class MCPServer:
 
             if method == "notifications/initialized":
                 if session_id:
+                    self._log(f"Iterating {len(self.connections)} connections to find session {session_id}")
                     for conn in self.connections:
                         if conn.session_id == session_id:
+                            self._log(f"Found matching connection for session {session_id}")
                             conn.initialized = True
                             break
+                    self._log(f"Finished iterating connections")
                 send_notification_ack()
                 return
             if method and method.startswith("notifications/") and is_notification:
@@ -683,11 +781,19 @@ class MCPServer:
             try:
                 # Handle MCP protocol methods
                 if method == "initialize":
+                    self._log(f"Calling: initialize")
                     result = self.mcp_handler.handle_initialize(params)
+                    self._log(f"Completed: initialize")
                 elif method == "tools/list":
+                    self._log(f"Calling: tools/list")
                     result = self.mcp_handler.handle_tools_list(params)
+                    self._log(f"Completed: tools/list")
                 elif method == "tools/call":
+                    tool_name = params.get('name', 'unknown') if params else 'unknown'
+                    tool_args = params.get('arguments', {}) if params else {}
+                    self._log(f"Calling tool: {tool_name} with args: {str(tool_args)[:200]}")
                     result = self.mcp_handler.handle_tools_call(params)
+                    self._log(f"Completed tool: {tool_name}")
                 else:
                     raise JSONRPCError(-32601, f"Method not found: {method}")
 
@@ -716,10 +822,14 @@ class MCPServer:
             # Find active SSE connection for this client (match by session ID)
             sse_conn = None
             if session_id:
+                self._log(f"Searching {len(self.connections)} connections for session {session_id}")
                 for conn in self.connections:
                     if conn.session_id == session_id and conn.alive:
+                        self._log(f"Found active SSE connection for session {session_id}")
                         sse_conn = conn
                         break
+                if not sse_conn:
+                    self._log(f"No active SSE connection found for session {session_id}")
 
             if not sse_conn:
                 # No SSE connection found
@@ -740,6 +850,8 @@ class MCPServer:
             }, b"Accepted")
 
         except Exception as e:
+            self._log(f"EXCEPTION in _handle_message_post: {type(e).__name__}: {e}")
+            self._log(f"Traceback:\n{traceback.format_exc()}")
             traceback.print_exc()
             error_response = {
                 "jsonrpc": "2.0",
@@ -756,6 +868,8 @@ class MCPServer:
                 "Content-Length": str(len(response_body))
             }
             self._send_http_response(client_socket, 400, headers, response_body)
+        finally:
+            self._log(f"_handle_message_post() finished for {client_address}")
 
     def _handle_options_request(self, client_socket: socket.socket):
         """Handle OPTIONS request for CORS"""
@@ -845,6 +959,7 @@ class MCPServer:
 
     def _handle_client(self, client_socket: socket.socket, client_address):
         """Handle a client connection"""
+        self._log(f"_handle_client() started for {client_address}")
         try:
             # Read HTTP request (with timeout)
             client_socket.settimeout(5.0)
@@ -929,6 +1044,8 @@ class MCPServer:
                 client_socket.close()
 
         except Exception as e:
+            self._log(f"EXCEPTION in _handle_client: {type(e).__name__}: {e}")
+            self._log(f"Traceback:\n{traceback.format_exc()}")
             traceback.print_exc()
             try:
                 self._send_http_response(client_socket, 500, {"Content-Type": "text/plain"}, str(e).encode('utf-8'))
@@ -938,6 +1055,8 @@ class MCPServer:
                 client_socket.close()
             except:
                 pass
+        finally:
+            self._log(f"_handle_client() finished for {client_address}")
 
     def _run_server(self):
         """Run the SSE server main loop"""
@@ -969,6 +1088,7 @@ class MCPServer:
             while self.running:
                 try:
                     client_socket, client_address = self.server_socket.accept()
+                    self._log(f"Accepting connection from {client_address}")
                     # Handle each client in a separate thread
                     client_thread = threading.Thread(
                         target=self._handle_client,
@@ -976,10 +1096,12 @@ class MCPServer:
                         daemon=True
                     )
                     client_thread.start()
+                    self._log(f"Client thread started: {client_thread.name} for {client_address}")
                 except socket.timeout:
                     continue
                 except Exception as e:
                     if self.running:
+                        self._log(f"Error accepting connection: {e}")
                         print(f"[MCP] Error accepting connection: {e}")
 
         except OSError as e:
@@ -1748,8 +1870,9 @@ def decompile_function(
     """Decompile a function at the given address"""
     start = parse_address(address)
     cfunc = decompile_checked(start)
-    if is_window_active():
-        ida_hexrays.open_pseudocode(start, ida_hexrays.OPF_REUSE)
+    # DISABLED: Opening pseudocode window from background thread causes crashes
+    # if is_window_active():
+    #     ida_hexrays.open_pseudocode(start, ida_hexrays.OPF_REUSE)
     sv = cfunc.get_pseudocode()
     pseudocode = ""
     for i, sl in enumerate(sv):
@@ -1810,8 +1933,9 @@ def disassemble_function(
     func = idaapi.get_func(start)
     if not func:
         raise IDAError(f"No function found at address {hex(start)}")
-    if is_window_active():
-        ida_kernwin.jumpto(start)
+    # DISABLED: Jumping to address from background thread causes crashes
+    # if is_window_active():
+    #     ida_kernwin.jumpto(start)
 
     func_name: str = ida_funcs.get_func_name(func.start_ea) or "<unnamed>"
 
