@@ -135,7 +135,7 @@ def main():
     ida_extra_args: str = ""
     if args.idb_dir:
         args.idb_dir.mkdir(parents=True, exist_ok=True)
-        ida_extra_args += f" -o{str(args.idb_dir)}"
+        ida_extra_args += f" -c -o{str(args.idb_dir)}"
         logger.info(f"Using IDB directory: {str(args.idb_dir)}")
 
     logger.info("opening database: %s", args.input_path)
