@@ -109,6 +109,7 @@ def main():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to listen on, default: 127.0.0.1")
     parser.add_argument("--port", type=int, default=8745, help="Port to listen on, default: 8745")
     parser.add_argument("--unsafe", action="store_true", help="Enable unsafe functions (DANGEROUS)")
+    parser.add_argument("--idb-dir", type=Path, help="Directory to store temporary IDB files")
     parser.add_argument("input_path", type=Path, help="Path to the input file to analyze.")
     args = parser.parse_args()
 
@@ -131,9 +132,14 @@ def main():
     if not args.input_path.exists():
         raise FileNotFoundError(f"Input file not found: {args.input_path}")
 
-    # TODO: add a tool for specifying the idb/input file (sandboxed)
+    ida_extra_args: str = ""
+    if args.idb_dir:
+        args.idb_dir.mkdir(parents=True, exist_ok=True)
+        ida_extra_args += f" -o{str(args.idb_dir)}"
+        logger.info(f"Using IDB directory: {str(args.idb_dir)}")
+
     logger.info("opening database: %s", args.input_path)
-    if idapro.open_database(str(args.input_path), run_auto_analysis=True):
+    if idapro.open_database(str(args.input_path), run_auto_analysis=True, args=ida_extra_args):
         raise RuntimeError("failed to analyze input file")
 
     logger.debug("idalib: waiting for analysis...")
